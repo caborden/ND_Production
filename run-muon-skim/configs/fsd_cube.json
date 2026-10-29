@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "detector_config": "fsd_cube",
+  "min_length_cm": 29.0,
+  "seed": 20260527,
+  "events_per_file": 30,
+  "translation_grid": {
+    "counts": [2, 10, 2],
+    "steps_cm": [47.1085, 29.96, 47.8318]
+  }
+}

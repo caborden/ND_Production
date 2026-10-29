@@ -10,9 +10,14 @@ if [[ ( (-z "$ND_PRODUCTION_RUNTIME") || ("$ND_PRODUCTION_RUNTIME" == "NONE") )
     source "$ND_PRODUCTION_INSTALL_DIR/larnd.venv/bin/activate"
 fi
 
-inDir=${ND_PRODUCTION_OUTDIR_BASE}/run-convert2h5/$ND_PRODUCTION_CONVERT2H5_NAME
-inName=$ND_PRODUCTION_CONVERT2H5_NAME.$globalIdx
-inFile=$(realpath $inDir/EDEPSIM_H5/$subDir/${inName}.EDEPSIM.hdf5)
+if [[ -n "${ND_PRODUCTION_LARNDSIM_INPUT_FILE:-}" ]]; then
+    # Explicit skim output file; submit once per entry in its completed larnd_inputs.txt.
+    inFile=$(realpath "$ND_PRODUCTION_LARNDSIM_INPUT_FILE")
+else
+    inDir=${ND_PRODUCTION_OUTDIR_BASE}/run-convert2h5/$ND_PRODUCTION_CONVERT2H5_NAME
+    inName=$ND_PRODUCTION_CONVERT2H5_NAME.$globalIdx
+    inFile=$(realpath "$inDir/EDEPSIM_H5/$subDir/${inName}.EDEPSIM.hdf5")
+fi
 
 outFile=$tmpOutDir/${outName}.LARNDSIM.hdf5
 rm -f "$outFile"
