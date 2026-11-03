@@ -189,6 +189,7 @@ def prepare(args):
 
     root.mkdir(parents=True)
     outputs.mkdir(parents=True)
+    (outputs / 'locks').mkdir()
     (root / 'logs').mkdir()
     shutil.copytree(production / 'run-muon-skim/muon_skim', root / 'code/muon_skim',
                     ignore=shutil.ignore_patterns('__pycache__'))
@@ -397,9 +398,17 @@ def tracks_stage(c):
     print((root / 'summary.json').read_text(), flush=True)
 
 
+def lock_path(c, name):
+    # The campaign root is on CFS, whose compute-node DVS access does not
+    # support flock. All submitters/workers must share locks on scratch.
+    directory = Path(c['outputs']) / 'locks'
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / name
+
+
 def run_stage(c, stage, worker):
     require(stage not in ('skim', 'tracks') or worker == 0, 'Single-worker stage requires index zero')
-    lock = Path(c['root']) / f'.{stage}-{worker}.lock'
+    lock = lock_path(c, f'.{stage}-{worker}.lock')
     with lock.open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         guard(c)
@@ -416,7 +425,7 @@ def run_stage(c, stage, worker):
 
 def submit(c, retry=False):
     root = Path(c['root'])
-    with (root / '.submit.lock').open('a') as stream:
+    with lock_path(c, '.submit.lock').open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         ledger_path = root / 'submission.json'
         ledger = read(ledger_path) if ledger_path.exists() else dict(attempts=[])

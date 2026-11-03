@@ -51,6 +51,20 @@ GPU and 32 CPU slots. Limits are two hours for skimming, six for each GPU worker
 three for each Flow worker, and three for selection/merging. These are limits,
 not estimates. Worker counts are configurable up to ten GPUs and five Flow jobs.
 
+Submission and worker lock files live in `<campaign outputs>/locks/` on scratch,
+not in the CFS campaign directory. CFS access through DVS on compute nodes does
+not support `flock`. Preparation creates the shared scratch lock directory;
+submission/workers also create it if needed. Do not delete lock files while a
+campaign is active. `HDF5_USE_FILE_LOCKING=FALSE` controls HDF5 only and does not
+replace these launcher locks.
+
+For a campaign prepared with the old CFS lock paths, pull the fix and prepare a
+**new campaign name** (for example `FSDCubeMuons_4500_v2`). The prepared campaign
+contains a frozen copy of the launcher: pulling the repository does not update
+that copy. Preserve the old directory for diagnosis and make sure its jobs have
+terminated before starting the replacement. The new campaign automatically
+creates both its CFS metadata directory and scratch output/lock directories.
+
 ## Prepare and submit on NERSC
 
 Copy `campaign.py` to `ND_Production-muon-skim/run-muon-skim/` if it has not

@@ -23,7 +23,8 @@ class CampaignTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.config = dict(root=str(self.root), name='test', gpu_workers=10, flow_workers=5,
+        self.config = dict(root=str(self.root), outputs=str(self.root / 'scratch-output'),
+                           name='test', gpu_workers=10, flow_workers=5,
                            cpu_account='cpu-account', gpu_account='gpu-account',
                            hashes={}, repos={}, external=[], sources=[], pilot_parts=[])
 
@@ -45,6 +46,8 @@ class CampaignTests(unittest.TestCase):
                 patch.object(c.subprocess, 'run') as run, redirect_stdout(io.StringIO()):
             c.submit(self.config)
         self.assertEqual(len(calls), 4)
+        self.assertTrue((Path(self.config['outputs']) / 'locks/.submit.lock').is_file())
+        self.assertFalse((self.root / '.submit.lock').exists())
         self.assertIn('--hold', calls[0])
         self.assertIn('--array=0-9%10', calls[1])
         self.assertIn('--array=0-4%5', calls[2])
@@ -152,6 +155,32 @@ class CampaignTests(unittest.TestCase):
         self.assertIn('H5FLOW_NOMPI=1', script.read_text())
         self.assertIn('SLURM_CPUS_PER_TASK', script.read_text())
 
+    def test_worker_lock_on_scratch_excludes_other_process_and_releases(self):
+        lock = Path(self.config['outputs']) / 'locks/.skim-0.lock'
+        contender = [sys.executable, '-c', '''
+import fcntl, sys
+with open(sys.argv[1], 'a') as stream:
+    try:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(23)
+''', str(lock)]
+        def stage(config):
+            self.assertTrue(lock.is_file())
+            self.assertFalse((self.root / '.skim-0.lock').exists())
+            self.assertEqual(subprocess.run(contender).returncode, 23)
+        with patch.object(c, 'skim_stage', side_effect=stage):
+            c.run_stage(self.config, 'skim', 0)
+        self.assertEqual(subprocess.run(contender).returncode, 0)
+
+    def test_worker_lock_released_after_stage_failure(self):
+        with patch.object(c, 'skim_stage', side_effect=RuntimeError('stage failed')):
+            with self.assertRaisesRegex(RuntimeError, 'stage failed'):
+                c.run_stage(self.config, 'skim', 0)
+        with patch.object(c, 'skim_stage') as stage:
+            c.run_stage(self.config, 'skim', 0)
+            stage.assert_called_once()
+
     def test_real_skim_gate_reuse_and_duplicate_content(self):
         fixture = fixtures.SkimTests()
         fixture.setUp()
@@ -248,6 +277,7 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(len(prepared['sources']), 5)
         self.assertNotIn(str(source), [p['path'] for p in prepared['sources']])
         self.assertEqual(prepared['pilot_tracks'], 2)
+        self.assertTrue((Path(prepared['outputs']) / 'locks').is_dir())
         self.assertEqual(c.read(jobs / 'overnight/skim-config.json'), config)
         self.assertEqual((jobs / 'overnight/campaign.sha256').read_text().strip(),
                          c.sha(jobs / 'overnight/campaign.json'))
