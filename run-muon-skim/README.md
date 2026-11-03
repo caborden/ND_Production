@@ -6,6 +6,9 @@ events for larnd-sim. It reuses Geant4 deposits; it does not regenerate transpor
 The importable `muon_skim` package contains all production logic. The inspection
 notebook imports that package and is not required to run production.
 
+For the grouped, dependency-gated NERSC chain from the completed muon pilot
+through larnd-sim, Cube Flow, selection, and merging, see [CAMPAIGN.md](CAMPAIGN.md).
+
 ## Selection contract
 
 - Configuration schema 1 defaults to a strict **length >29 cm**, seed 20260527,
