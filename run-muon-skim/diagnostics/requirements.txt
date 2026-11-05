@@ -1,0 +1,5 @@
+numpy
+h5py
+plotly>=5
+nbformat>=5
+ipykernel
