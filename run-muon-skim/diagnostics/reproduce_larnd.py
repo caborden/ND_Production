@@ -87,7 +87,11 @@ def main():
     parser.add_argument('--campaign', type=Path, required=True)
     parser.add_argument('--index', type=int, default=62)
     parser.add_argument('--output-dir', type=Path, required=True)
+    parser.add_argument('--segment-batch-size', type=int,
+                        help='Override the FSD Cube segment_batch_size for this run')
     args = parser.parse_args()
+    if args.segment_batch_size is not None and args.segment_batch_size <= 0:
+        parser.error('--segment-batch-size must be positive')
     root = args.campaign.resolve()
     config_path = root / 'campaign.json'
     digest = hashlib.sha256(config_path.read_bytes()).hexdigest()
@@ -107,6 +111,18 @@ def main():
     command = [str(script), 'fsd_cube', '--input_filename', row['skim'],
                '--output_filename', str(output / 'simulation.LARNDSIM.hdf5'),
                '--rand_seed', str(args.index + 1), '--compression', 'None']
+    if args.segment_batch_size is not None:
+        from larndsim.config import get_config
+        import yaml
+
+        source = Path(get_config('fsd_cube')['SIM_PROPERTIES'])
+        properties = yaml.safe_load(source.read_text())
+        print(f"Using {source}: segment_batch_size {properties['segment_batch_size']} "
+              f"-> {args.segment_batch_size}", flush=True)
+        properties['segment_batch_size'] = args.segment_batch_size
+        override = output / 'simulation_properties.yaml'
+        override.write_text(yaml.safe_dump(properties, sort_keys=False))
+        command.extend(['--simulation_properties', str(override)])
     import cupy as cp
     metadata = dict(command=command, cwd=config['work'], input=row,
                     campaign_sha256=digest, python=sys.version, cupy=cp.__version__,
