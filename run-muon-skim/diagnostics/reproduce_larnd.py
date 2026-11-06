@@ -87,6 +87,8 @@ def main():
     parser.add_argument('--campaign', type=Path, required=True)
     parser.add_argument('--index', type=int, default=62)
     parser.add_argument('--output-dir', type=Path, required=True)
+    parser.add_argument('--simulator-script', type=Path,
+                        help='Run a diagnostic copy of the installed simulator')
     parser.add_argument('--segment-batch-size', type=int,
                         help='Override the FSD Cube segment_batch_size for this run')
     args = parser.parse_args()
@@ -104,7 +106,8 @@ def main():
     campaign.guard(config)
     rows = json.loads((root / 'files.json').read_text())
     row, = [r for r in rows if r['index'] == args.index]
-    script = Path(config['envs']['larnd']).resolve(strict=True)
+    installed = Path(config['envs']['larnd']).resolve(strict=True)
+    script = (args.simulator_script or installed).resolve(strict=True)
     signals_lines(script)
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -125,6 +128,7 @@ def main():
         command.extend(['--simulation_properties', str(override)])
     import cupy as cp
     metadata = dict(command=command, cwd=config['work'], input=row,
+                    installed_simulator_sha256=hashlib.sha256(installed.read_bytes()).hexdigest(),
                     campaign_sha256=digest, python=sys.version, cupy=cp.__version__,
                     simulator_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
                     instrument_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
