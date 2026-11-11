@@ -91,7 +91,11 @@ def main():
                         help='Run a diagnostic copy of the installed simulator')
     parser.add_argument('--segment-batch-size', type=int,
                         help='Override the FSD Cube segment_batch_size for this run')
+    parser.add_argument('--settings-campaign', type=Path,
+                        help='Use the simulator and frozen overrides from this prepared campaign')
     args = parser.parse_args()
+    if args.settings_campaign and (args.simulator_script or args.segment_batch_size is not None):
+        parser.error('--settings-campaign supplies both simulator and settings')
     if args.segment_batch_size is not None and args.segment_batch_size <= 0:
         parser.error('--segment-batch-size must be positive')
     root = args.campaign.resolve()
@@ -108,12 +112,26 @@ def main():
     row, = [r for r in rows if r['index'] == args.index]
     installed = Path(config['envs']['larnd']).resolve(strict=True)
     script = (args.simulator_script or installed).resolve(strict=True)
+    overrides = []
+    settings_digest = None
+    if args.settings_campaign:
+        settings_path = args.settings_campaign.resolve() / 'campaign.json'
+        settings_digest = hashlib.sha256(settings_path.read_bytes()).hexdigest()
+        if settings_digest != settings_path.with_suffix('.sha256').read_text().strip():
+            raise ValueError('Production settings checksum mismatch')
+        settings = json.loads(settings_path.read_text())
+        campaign.guard(settings)
+        python, cli = settings['larnd_command']
+        if Path(sys.prefix).resolve() != Path(python).parent.parent.resolve():
+            raise ValueError('Run the diagnostic with the production virtual environment')
+        script = Path(cli).resolve(strict=True)
+        overrides = settings['larnd_overrides']
     signals_lines(script)
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=False)
     command = [str(script), 'fsd_cube', '--input_filename', row['skim'],
                '--output_filename', str(output / 'simulation.LARNDSIM.hdf5'),
-               '--rand_seed', str(args.index + 1), '--compression', 'None']
+               '--rand_seed', str(args.index + 1), '--compression', 'None', *overrides]
     if args.segment_batch_size is not None:
         from larndsim.config import get_config
         import yaml
@@ -127,7 +145,7 @@ def main():
         override.write_text(yaml.safe_dump(properties, sort_keys=False))
         command.extend(['--simulation_properties', str(override)])
     import cupy as cp
-    metadata = dict(command=command, cwd=config['work'], input=row,
+    metadata = dict(settings_campaign_sha256=settings_digest, command=command, cwd=config['work'], input=row,
                     installed_simulator_sha256=hashlib.sha256(installed.read_bytes()).hexdigest(),
                     campaign_sha256=digest, python=sys.version, cupy=cp.__version__,
                     simulator_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),

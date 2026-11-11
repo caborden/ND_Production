@@ -206,7 +206,7 @@ with open(sys.argv[1], 'a') as stream:
         finally:
             fixture.tearDown()
 
-    def test_prepare_excludes_pilot_freezes_settings_and_never_submits(self):
+    def prepare_fixture(self):
         work = self.root / 'work'
         jobs = work / 'muon-skim-jobs'
         scratch = self.root / 'scratch'
@@ -267,6 +267,10 @@ with open(sys.argv[1], 'a') as stream:
         args = Namespace(work_root=str(work), name='overnight', additional_sources=5,
                          gpu_workers=10, flow_workers=5, cpu_account='cpu', gpu_account='gpu',
                          source_dir=str(source_dir), analysis_env=str(work / 'analysis'))
+        return args, work, jobs, scratch, output_base, source, config
+
+    def test_prepare_excludes_pilot_freezes_settings_and_never_submits(self):
+        args, work, jobs, scratch, output_base, source, config = self.prepare_fixture()
         with patch.dict(c.os.environ, SCRATCH=str(scratch), ND_PRODUCTION_OUTDIR_BASE=str(output_base)), \
                 patch.object(c, 'git_state', return_value=dict(commit=c.FLOW_COMMIT, diff_sha256='clean')), \
                 patch.object(c.subprocess, 'run') as run, redirect_stdout(io.StringIO()):
@@ -281,6 +285,49 @@ with open(sys.argv[1], 'a') as stream:
         self.assertEqual(c.read(jobs / 'overnight/skim-config.json'), config)
         self.assertEqual((jobs / 'overnight/campaign.sha256').read_text().strip(),
                          c.sha(jobs / 'overnight/campaign.json'))
+
+    def test_prc4_resimulates_all_sources_and_passes_frozen_overrides(self):
+        args, work, jobs, scratch, output_base, source, _ = self.prepare_fixture()
+        work, source = work.resolve(), source.resolve()
+        args.segment_batch_size = 10000
+        args.prc4 = True
+        repo = work / 'larnd-sim-muon-skim-wFFE'
+        props = repo / 'larndsim'
+        shutil.copytree(work / 'larnd-sim', repo)
+        shutil.copytree(work / 'larnd.venv', work / 'larnd-wFFE.venv')
+        response = self.root / '9x9-response.npz'
+        response.touch()
+        (props / 'config/config.yaml').write_text(yaml.safe_dump(dict(fsd_cube=dict(
+            LIGHT_SIMULATED=False, RESPONSE=str(response), DET_PROPERTIES='cube.yaml',
+            SIM_PROPERTIES='sim.yaml'))))
+        (props / 'detector_properties').mkdir()
+        (props / 'simulation_properties').mkdir()
+        (props / 'detector_properties/cube.yaml').write_text('periodic_reset_cycles: 512\n')
+        (props / 'simulation_properties/sim.yaml').write_text('farfield_enabled: true\nsegment_batch_size: 10000\n')
+        def state(path):
+            return dict(commit=c.FFE_COMMIT if Path(path) == repo else c.FLOW_COMMIT,
+                        diff_sha256=c.hashlib.sha256(b'').hexdigest())
+        root = jobs / args.name
+        with patch.dict(c.os.environ, SCRATCH=str(scratch), ND_PRODUCTION_OUTDIR_BASE=str(output_base)), \
+                patch.object(c, 'git_state', side_effect=state), \
+                patch.object(c.subprocess, 'check_output', return_value=str(props / '__init__.py')), \
+                redirect_stdout(io.StringIO()):
+            c.prepare(args)
+            cfg = c.read(root / 'campaign.json')
+            c.guard(cfg)
+        self.assertEqual(len(cfg['sources']), 6)
+        self.assertEqual(cfg['sources'][0]['path'], str(source))
+        self.assertEqual((cfg['pilot_parts'], cfg['pilot_source_hashes'], cfg['seed_offset']), ([], [], 0))
+        c.write(root / 'files.json', [dict(index=62, skim='input', larnd='output')])
+        with patch.object(c, 'run_file') as runner:
+            c.larnd_stage(cfg, 0)
+        cmd = runner.call_args.args[2]('partial')
+        self.assertEqual(cmd[:3], [str(work / 'larnd-wFFE.venv/bin/python'), str(repo / 'cli/simulate_pixels.py'), 'fsd_cube'])
+        for flag, expected in [('--detector_properties', {'periodic_reset_cycles': 256}),
+                               ('--simulation_properties', {'segment_batch_size': 10000, 'farfield_enabled': True})]:
+            path = Path(cmd[cmd.index(flag) + 1])
+            self.assertEqual(cfg['hashes'][str(path)], c.sha(path))
+            self.assertEqual(yaml.safe_load(path.read_text()), expected)
 
 
 if __name__ == '__main__':

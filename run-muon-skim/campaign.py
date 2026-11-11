@@ -23,6 +23,7 @@ import h5py
 import numpy as np
 import yaml
 
+FFE_COMMIT = '44c546613f5bd9e9c667a160884c06cc9b1a9dbe'
 FLOW_COMMIT = '916fb2e1f023f95206632f4a839ab923c6561751'
 TRACK_FILES = ('track_selection_fsd.py', 'batch_track_selection.py',
                'track_output_hdf5.py', 'merge_track_outputs.py', 'efield.py')
@@ -122,6 +123,7 @@ def check_tracks(path, code, expected_source=None):
 
 
 def prepare(args):
+    prc4 = getattr(args, 'prc4', False)
     work = Path(args.work_root).resolve()
     jobs = work / 'muon-skim-jobs'
     output_base = Path(os.environ.get('ND_PRODUCTION_OUTDIR_BASE',
@@ -132,6 +134,8 @@ def prepare(args):
     require(args.cpu_account and args.gpu_account and
             not args.cpu_account.startswith('YOUR_') and not args.gpu_account.startswith('YOUR_'),
             'Set CPU_ACCOUNT and GPU_ACCOUNT, or provide --cpu-account and --gpu-account')
+    if prc4:
+        require(args.segment_batch_size > 0, 'Segment batch size must be positive')
     root = jobs / args.name
     outputs = Path(os.environ['SCRATCH']) / 'fsd-muon-production/campaigns' / args.name
     require(not root.exists() and not outputs.exists(), 'Campaign already exists; choose a new name')
@@ -144,28 +148,39 @@ def prepare(args):
     sources = [p for p in candidates if p not in old_sources][:args.additional_sources]
     require(len(sources) == args.additional_sources, 'Not enough new source files')
     track_code = jobs / 'track-selection-29cm-v1/code'
-    track_manifest_path = Path(os.environ['SCRATCH']) / 'fsd-muon-production/track-selection/FSDCubeMuons_pilot_v1.min29cm/parts/batch_manifest.json'
-    track_manifest = read(track_manifest_path)
-    require(track_manifest['status'] == 'complete' and track_manifest['min_length_cm'] == 29,
-            'Pilot track batch is incomplete or uses another length cut')
     pilot_parts = []
     pilot_tracks = 0
-    for row in track_manifest['files']:
-        require(row['status'] == 'complete', 'Pilot track file incomplete')
-        pilot_tracks += check_tracks(row['output'], track_code, row['input'])
-        pilot_parts.append(identity(row['output']))
-    require(pilot_parts, 'No pilot track outputs')
-    require(len(pilot_parts) == len(pilot['outputs']), 'Pilot skim/track file count mismatch')
+    if prc4:
+        sources = sorted(old_sources) + sources
+    else:
+        track_manifest_path = Path(os.environ['SCRATCH']) / 'fsd-muon-production/track-selection/FSDCubeMuons_pilot_v1.min29cm/parts/batch_manifest.json'
+        track_manifest = read(track_manifest_path)
+        require(track_manifest['status'] == 'complete' and track_manifest['min_length_cm'] == 29,
+                'Pilot track batch is incomplete or uses another length cut')
+        for row in track_manifest['files']:
+            require(row['status'] == 'complete', 'Pilot track file incomplete')
+            pilot_tracks += check_tracks(row['output'], track_code, row['input'])
+            pilot_parts.append(identity(row['output']))
+        require(pilot_parts, 'No pilot track outputs')
+        require(len(pilot_parts) == len(pilot['outputs']), 'Pilot skim/track file count mismatch')
 
     production = work / 'ND_Production-muon-skim'
-    larnd = work / 'larnd-sim'
+    larnd = work / ('larnd-sim-muon-skim-wFFE' if prc4 else 'larnd-sim')
+    larnd_env = work / ('larnd-wFFE.venv' if prc4 else 'larnd.venv')
     flow = work / 'flow-fsdcube-916fb2e1/ndlar_flow'
     require(git_state(flow)['commit'] == FLOW_COMMIT, 'Flow checkout is not the reviewed pilot revision')
-    saved_larnd_commit = jobs / 'larnd-sim.commit.txt'
-    require(saved_larnd_commit.read_text().strip() == git_state(larnd)['commit'],
-            'larnd-sim commit differs from saved pilot revision')
-    for row in pilot['metadata']['geometry_sources']:
-        require(sha(row['path']) == row['sha256'], 'Geometry/config registry changed since pilot')
+    if prc4:
+        require(git_state(larnd) == dict(commit=FFE_COMMIT, diff_sha256=hashlib.sha256(b'').hexdigest()),
+                'Expected the clean file-62 FFE checkout with del signals')
+        package = subprocess.check_output([str(larnd_env / 'bin/python'), '-c',
+            'import larndsim; print(larndsim.__file__)'], text=True, cwd=work).strip()
+        require(Path(package).resolve().parent == larnd / 'larndsim', 'FFE venv imports another checkout')
+    else:
+        saved_larnd_commit = jobs / 'larnd-sim.commit.txt'
+        require(saved_larnd_commit.read_text().strip() == git_state(larnd)['commit'],
+                'larnd-sim commit differs from saved pilot revision')
+        for row in pilot['metadata']['geometry_sources']:
+            require(sha(row['path']) == row['sha256'], 'Geometry/config registry changed since pilot')
     for row in pilot['metadata']['code']:
         path = production / 'run-muon-skim/muon_skim' / Path(row['path']).name
         require(sha(path) == row['sha256'], f'Skim code changed since pilot: {path}')
@@ -177,10 +192,18 @@ def prepare(args):
     if not response.is_absolute():
         response = larnd / 'larndsim/bin' / response
     external = [identity(pedestal), identity(response)]
+    if prc4:
+        props = larnd / 'larndsim'
+        detector = yaml.safe_load((props / 'detector_properties' / registry['DET_PROPERTIES']).read_text())
+        sim = yaml.safe_load((props / 'simulation_properties' / registry['SIM_PROPERTIES']).read_text())
+        require(sim.get('farfield_enabled') is True and '9x9' in response.name, 'Expected FFE Cube response')
+        require('periodic_reset_cycles' in detector, 'Missing Cube periodic reset setting')
+        detector['periodic_reset_cycles'] = 256
+        sim['segment_batch_size'] = args.segment_batch_size
     for workflow in WORKFLOWS:
         require((flow / 'yamls/fsdcube_flow/workflows' / workflow).is_file(), f'Missing {workflow}')
     envs = dict(skim=str(work / 'skim.venv/bin/python'),
-                larnd=str(work / 'larnd.venv/bin/simulate_pixels.py'),
+                larnd=str(larnd_env / 'bin/simulate_pixels.py'),
                 flow=str(work / 'flow-fsdcube-916fb2e1/flow.venv/bin/h5flow'),
                 analysis=args.analysis_env)
     for key in ('skim', 'larnd', 'flow'):
@@ -200,13 +223,25 @@ def prepare(args):
     config = dict(name=args.name, root=str(root), outputs=str(outputs), envs=envs,
                   work=str(work), larnd=str(larnd), flow=str(flow),
                   sources=[identity(p) for p in sources],
-                  pilot_source_hashes=[row['sha256'] for row in pilot['sources']],
+                  pilot_source_hashes=[] if prc4 else [row['sha256'] for row in pilot['sources']],
                   pilot_parts=pilot_parts, pilot_tracks=pilot_tracks,
-                  seed_offset=len(pilot['outputs']), gpu_workers=args.gpu_workers,
+                  seed_offset=0 if prc4 else len(pilot['outputs']), gpu_workers=args.gpu_workers,
                   flow_workers=args.flow_workers, cpu_account=args.cpu_account,
                   gpu_account=args.gpu_account, external=external,
                   repos={str(p): git_state(p) for p in (larnd, flow)},
                   hashes={str(p): sha(p) for p in sorted((root / 'code').rglob('*.py'))})
+    if prc4:
+        overrides = []
+        for flag, filename, values in [('detector_properties', 'detector-prc4.yaml', detector),
+                                       ('simulation_properties', 'simulation-ffe.yaml', sim)]:
+            path = root / filename
+            path.write_text(yaml.safe_dump(values, sort_keys=False))
+            config['hashes'][str(path)] = sha(path)
+            overrides.extend(['--' + flag, str(path)])
+        # Execute the pinned CLI using the same editable environment as file 62.
+        config['larnd_command'] = [str(larnd_env / 'bin/python'), str(larnd / 'cli/simulate_pixels.py')]
+        config['larnd_overrides'] = overrides
+        config['larnd_activate'] = str(larnd_env / 'bin/activate')
     config['hashes'][str(root / 'skim-config.json')] = sha(root / 'skim-config.json')
     config['hashes'][str(root / 'campaign.py')] = sha(root / 'campaign.py')
     (root / 'stage.sh').write_text(stage_script(config))
@@ -215,7 +250,7 @@ def prepare(args):
     (root / 'campaign.sha256').write_text(sha(root / 'campaign.json') + '\n')
     print(json.dumps(dict(campaign=str(root / 'campaign.json'),
                           new_sources=[str(p) for p in sources], pilot_tracks=pilot_tracks,
-                          expected_total_tracks=pilot_tracks * (1 + len(sources) / len(old_sources))), indent=2))
+                          expected_total_tracks=(740 * len(sources) if prc4 else pilot_tracks * (1 + len(sources) / len(old_sources)))), indent=2))
     print('Prepared only; submit with:')
     print(shlex.join([envs['skim'], str(root / 'campaign.py'), 'submit', str(root / 'campaign.json')]))
 
@@ -235,7 +270,7 @@ else
     controller={q(c['envs']['skim'])}
     if [[ "$stage" == larnd ]]; then
         module load cudatoolkit/12.4
-        source {q(str(Path(c['work']) / 'larnd.venv/bin/activate'))}
+        source {q(c.get('larnd_activate', str(Path(c['work']) / 'larnd.venv/bin/activate')))}
     fi
 fi
 export H5FLOW_NOMPI=1 HDF5_USE_FILE_LOCKING=FALSE MPLBACKEND=Agg
@@ -350,9 +385,9 @@ def larnd_stage(c, worker):
     root = Path(c['root'])
     for row in groups(read(root / 'files.json'), c['gpu_workers'], worker):
         run_file(row['skim'], row['larnd'],
-                 lambda partial: [c['envs']['larnd'], 'fsd_cube', '--input_filename', row['skim'],
+                 lambda partial: [*c.get('larnd_command', [c['envs']['larnd']]), 'fsd_cube', '--input_filename', row['skim'],
                                   '--output_filename', partial, '--rand_seed', row['index'] + 1,
-                                  '--compression', 'None'],
+                                  '--compression', 'None', *c.get('larnd_overrides', [])],
                  root / 'logs' / f'larnd-{row["index"]:07d}.log', c['work'], larnd_check)
 
 
@@ -485,6 +520,8 @@ def main():
     prep.add_argument('--name', required=True)
     prep.add_argument('--work-root', default='/global/cfs/cdirs/dune/users/cborden')
     prep.add_argument('--source-dir', default=SOURCE_DIR)
+    prep.add_argument('--prc4', action='store_true', help='Resimulate the pilot source and additional sources with FFE, PRC 256, and FFE simulation settings')
+    prep.add_argument('--segment-batch-size', type=int, default=10000, help='PRC4 segment batch target (default 10000)')
     prep.add_argument('--additional-sources', type=int, default=5)
     prep.add_argument('--gpu-workers', type=int, default=10)
     prep.add_argument('--flow-workers', type=int, default=5)
