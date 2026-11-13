@@ -134,6 +134,9 @@ def prepare(args):
     require(args.cpu_account and args.gpu_account and
             not args.cpu_account.startswith('YOUR_') and not args.gpu_account.startswith('YOUR_'),
             'Set CPU_ACCOUNT and GPU_ACCOUNT, or provide --cpu-account and --gpu-account')
+    adc_busy_delay = getattr(args, 'adc_busy_delay', None)
+    if adc_busy_delay is not None:
+        require(prc4 and adc_busy_delay >= 0, '--adc-busy-delay requires --prc4 and a nonnegative cycle count')
     if prc4:
         require(args.segment_batch_size > 0, 'Segment batch size must be positive')
     root = jobs / args.name
@@ -199,6 +202,8 @@ def prepare(args):
         require(sim.get('farfield_enabled') is True and '9x9' in response.name, 'Expected FFE Cube response')
         require('periodic_reset_cycles' in detector, 'Missing Cube periodic reset setting')
         detector['periodic_reset_cycles'] = 256
+        if adc_busy_delay is not None:
+            detector['adc_busy_delay'] = adc_busy_delay
         sim['segment_batch_size'] = args.segment_batch_size
     for workflow in WORKFLOWS:
         require((flow / 'yamls/fsdcube_flow/workflows' / workflow).is_file(), f'Missing {workflow}')
@@ -521,6 +526,7 @@ def main():
     prep.add_argument('--work-root', default='/global/cfs/cdirs/dune/users/cborden')
     prep.add_argument('--source-dir', default=SOURCE_DIR)
     prep.add_argument('--prc4', action='store_true', help='Resimulate the pilot source and additional sources with FFE, PRC 256, and FFE simulation settings')
+    prep.add_argument('--adc-busy-delay', type=int, help='Override the PRC4 detector ADC busy delay in clock cycles')
     prep.add_argument('--segment-batch-size', type=int, default=10000, help='PRC4 segment batch target (default 10000)')
     prep.add_argument('--additional-sources', type=int, default=5)
     prep.add_argument('--gpu-workers', type=int, default=10)

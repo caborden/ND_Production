@@ -290,6 +290,7 @@ with open(sys.argv[1], 'a') as stream:
         args, work, jobs, scratch, output_base, source, _ = self.prepare_fixture()
         work, source = work.resolve(), source.resolve()
         args.segment_batch_size = 10000
+        args.adc_busy_delay = 8
         args.prc4 = True
         repo = work / 'larnd-sim-muon-skim-wFFE'
         props = repo / 'larndsim'
@@ -323,7 +324,7 @@ with open(sys.argv[1], 'a') as stream:
             c.larnd_stage(cfg, 0)
         cmd = runner.call_args.args[2]('partial')
         self.assertEqual(cmd[:3], [str(work / 'larnd-wFFE.venv/bin/python'), str(repo / 'cli/simulate_pixels.py'), 'fsd_cube'])
-        for flag, expected in [('--detector_properties', {'periodic_reset_cycles': 256}),
+        for flag, expected in [('--detector_properties', {'periodic_reset_cycles': 256, 'adc_busy_delay': 8}),
                                ('--simulation_properties', {'segment_batch_size': 10000, 'farfield_enabled': True})]:
             path = Path(cmd[cmd.index(flag) + 1])
             self.assertEqual(cfg['hashes'][str(path)], c.sha(path))
