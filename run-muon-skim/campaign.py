@@ -271,7 +271,7 @@ if [[ "$stage" == tracks ]]; then
     conda activate {q(c['envs']['analysis'])}
     controller=$(command -v python)
 else
-    module load python/3.11
+    module load python
     controller={q(c['envs']['skim'])}
     if [[ "$stage" == larnd ]]; then
         module load cudatoolkit/12.4
