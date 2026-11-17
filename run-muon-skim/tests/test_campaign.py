@@ -287,11 +287,27 @@ with open(sys.argv[1], 'a') as stream:
                          c.sha(jobs / 'overnight/campaign.json'))
 
     def test_prc4_resimulates_all_sources_and_passes_frozen_overrides(self):
+        self.check_prc_campaign(4, legacy=True)
+
+    def test_prc2_resimulates_all_sources_and_passes_frozen_overrides(self):
+        self.check_prc_campaign(2)
+
+    def test_prc4_explicit_option(self):
+        self.check_prc_campaign(4)
+
+    def test_prc8_resimulates_all_sources_and_passes_frozen_overrides(self):
+        self.check_prc_campaign(8)
+
+    def test_prc16_resimulates_all_sources_and_passes_frozen_overrides(self):
+        self.check_prc_campaign(16)
+
+    def check_prc_campaign(self, prc, legacy=False):
         args, work, jobs, scratch, output_base, source, _ = self.prepare_fixture()
         work, source = work.resolve(), source.resolve()
         args.segment_batch_size = 10000
         args.adc_busy_delay = 8
-        args.prc4 = True
+        args.prc4 = legacy
+        args.prc = None if legacy else prc
         repo = work / 'larnd-sim-muon-skim-wFFE'
         props = repo / 'larndsim'
         shutil.copytree(work / 'larnd-sim', repo)
@@ -319,12 +335,13 @@ with open(sys.argv[1], 'a') as stream:
         self.assertEqual(len(cfg['sources']), 6)
         self.assertEqual(cfg['sources'][0]['path'], str(source))
         self.assertEqual((cfg['pilot_parts'], cfg['pilot_source_hashes'], cfg['seed_offset']), ([], [], 0))
+        self.assertTrue((root / f'detector-prc{prc}.yaml').is_file())
         c.write(root / 'files.json', [dict(index=62, skim='input', larnd='output')])
         with patch.object(c, 'run_file') as runner:
             c.larnd_stage(cfg, 0)
         cmd = runner.call_args.args[2]('partial')
         self.assertEqual(cmd[:3], [str(work / 'larnd-wFFE.venv/bin/python'), str(repo / 'cli/simulate_pixels.py'), 'fsd_cube'])
-        for flag, expected in [('--detector_properties', {'periodic_reset_cycles': 256, 'adc_busy_delay': 8}),
+        for flag, expected in [('--detector_properties', {'periodic_reset_cycles': prc * 64, 'adc_busy_delay': 8}),
                                ('--simulation_properties', {'segment_batch_size': 10000, 'farfield_enabled': True})]:
             path = Path(cmd[cmd.index(flag) + 1])
             self.assertEqual(cfg['hashes'][str(path)], c.sha(path))

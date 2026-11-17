@@ -123,7 +123,12 @@ def check_tracks(path, code, expected_source=None):
 
 
 def prepare(args):
-    prc4 = getattr(args, 'prc4', False)
+    prc = getattr(args, 'prc', None)
+    if getattr(args, 'prc4', False):
+        require(prc is None, 'Use only one of --prc and --prc4')
+        prc = 4
+    require(prc is None or prc in (2, 4, 8, 16), 'PRC must be 2, 4, 8, or 16')
+    ffe_mode = prc is not None
     work = Path(args.work_root).resolve()
     jobs = work / 'muon-skim-jobs'
     output_base = Path(os.environ.get('ND_PRODUCTION_OUTDIR_BASE',
@@ -136,8 +141,8 @@ def prepare(args):
             'Set CPU_ACCOUNT and GPU_ACCOUNT, or provide --cpu-account and --gpu-account')
     adc_busy_delay = getattr(args, 'adc_busy_delay', None)
     if adc_busy_delay is not None:
-        require(prc4 and adc_busy_delay >= 0, '--adc-busy-delay requires --prc4 and a nonnegative cycle count')
-    if prc4:
+        require(ffe_mode and adc_busy_delay >= 0, '--adc-busy-delay requires --prc (or --prc4) and a nonnegative cycle count')
+    if ffe_mode:
         require(args.segment_batch_size > 0, 'Segment batch size must be positive')
     root = jobs / args.name
     outputs = Path(os.environ['SCRATCH']) / 'fsd-muon-production/campaigns' / args.name
@@ -153,7 +158,7 @@ def prepare(args):
     track_code = jobs / 'track-selection-29cm-v1/code'
     pilot_parts = []
     pilot_tracks = 0
-    if prc4:
+    if ffe_mode:
         sources = sorted(old_sources) + sources
     else:
         track_manifest_path = Path(os.environ['SCRATCH']) / 'fsd-muon-production/track-selection/FSDCubeMuons_pilot_v1.min29cm/parts/batch_manifest.json'
@@ -168,11 +173,11 @@ def prepare(args):
         require(len(pilot_parts) == len(pilot['outputs']), 'Pilot skim/track file count mismatch')
 
     production = work / 'ND_Production-muon-skim'
-    larnd = work / ('larnd-sim-muon-skim-wFFE' if prc4 else 'larnd-sim')
-    larnd_env = work / ('larnd-wFFE.venv' if prc4 else 'larnd.venv')
+    larnd = work / ('larnd-sim-muon-skim-wFFE' if ffe_mode else 'larnd-sim')
+    larnd_env = work / ('larnd-wFFE.venv' if ffe_mode else 'larnd.venv')
     flow = work / 'flow-fsdcube-916fb2e1/ndlar_flow'
     require(git_state(flow)['commit'] == FLOW_COMMIT, 'Flow checkout is not the reviewed pilot revision')
-    if prc4:
+    if ffe_mode:
         require(git_state(larnd) == dict(commit=FFE_COMMIT, diff_sha256=hashlib.sha256(b'').hexdigest()),
                 'Expected the clean file-62 FFE checkout with del signals')
         package = subprocess.check_output([str(larnd_env / 'bin/python'), '-c',
@@ -195,13 +200,13 @@ def prepare(args):
     if not response.is_absolute():
         response = larnd / 'larndsim/bin' / response
     external = [identity(pedestal), identity(response)]
-    if prc4:
+    if ffe_mode:
         props = larnd / 'larndsim'
         detector = yaml.safe_load((props / 'detector_properties' / registry['DET_PROPERTIES']).read_text())
         sim = yaml.safe_load((props / 'simulation_properties' / registry['SIM_PROPERTIES']).read_text())
         require(sim.get('farfield_enabled') is True and '9x9' in response.name, 'Expected FFE Cube response')
         require('periodic_reset_cycles' in detector, 'Missing Cube periodic reset setting')
-        detector['periodic_reset_cycles'] = 256
+        detector['periodic_reset_cycles'] = prc * 64
         if adc_busy_delay is not None:
             detector['adc_busy_delay'] = adc_busy_delay
         sim['segment_batch_size'] = args.segment_batch_size
@@ -228,16 +233,16 @@ def prepare(args):
     config = dict(name=args.name, root=str(root), outputs=str(outputs), envs=envs,
                   work=str(work), larnd=str(larnd), flow=str(flow),
                   sources=[identity(p) for p in sources],
-                  pilot_source_hashes=[] if prc4 else [row['sha256'] for row in pilot['sources']],
+                  pilot_source_hashes=[] if ffe_mode else [row['sha256'] for row in pilot['sources']],
                   pilot_parts=pilot_parts, pilot_tracks=pilot_tracks,
-                  seed_offset=0 if prc4 else len(pilot['outputs']), gpu_workers=args.gpu_workers,
+                  seed_offset=0 if ffe_mode else len(pilot['outputs']), gpu_workers=args.gpu_workers,
                   flow_workers=args.flow_workers, cpu_account=args.cpu_account,
                   gpu_account=args.gpu_account, external=external,
                   repos={str(p): git_state(p) for p in (larnd, flow)},
                   hashes={str(p): sha(p) for p in sorted((root / 'code').rglob('*.py'))})
-    if prc4:
+    if ffe_mode:
         overrides = []
-        for flag, filename, values in [('detector_properties', 'detector-prc4.yaml', detector),
+        for flag, filename, values in [('detector_properties', f'detector-prc{prc}.yaml', detector),
                                        ('simulation_properties', 'simulation-ffe.yaml', sim)]:
             path = root / filename
             path.write_text(yaml.safe_dump(values, sort_keys=False))
@@ -255,7 +260,7 @@ def prepare(args):
     (root / 'campaign.sha256').write_text(sha(root / 'campaign.json') + '\n')
     print(json.dumps(dict(campaign=str(root / 'campaign.json'),
                           new_sources=[str(p) for p in sources], pilot_tracks=pilot_tracks,
-                          expected_total_tracks=(740 * len(sources) if prc4 else pilot_tracks * (1 + len(sources) / len(old_sources)))), indent=2))
+                          expected_total_tracks=(740 * len(sources) if ffe_mode else pilot_tracks * (1 + len(sources) / len(old_sources)))), indent=2))
     print('Prepared only; submit with:')
     print(shlex.join([envs['skim'], str(root / 'campaign.py'), 'submit', str(root / 'campaign.json')]))
 
@@ -525,9 +530,12 @@ def main():
     prep.add_argument('--name', required=True)
     prep.add_argument('--work-root', default='/global/cfs/cdirs/dune/users/cborden')
     prep.add_argument('--source-dir', default=SOURCE_DIR)
-    prep.add_argument('--prc4', action='store_true', help='Resimulate the pilot source and additional sources with FFE, PRC 256, and FFE simulation settings')
-    prep.add_argument('--adc-busy-delay', type=int, help='Override the PRC4 detector ADC busy delay in clock cycles')
-    prep.add_argument('--segment-batch-size', type=int, default=10000, help='PRC4 segment batch target (default 10000)')
+    prc_group = prep.add_mutually_exclusive_group()
+    prc_group.add_argument('--prc', type=int, choices=(2, 4, 8, 16),
+                           help='Resimulate all sources with FFE and periodic_reset_cycles = PRC * 64')
+    prc_group.add_argument('--prc4', action='store_true', help='Backward-compatible alias for --prc 4')
+    prep.add_argument('--adc-busy-delay', type=int, help='Override the FFE detector ADC busy delay in clock cycles')
+    prep.add_argument('--segment-batch-size', type=int, default=10000, help='FFE segment batch target (default 10000)')
     prep.add_argument('--additional-sources', type=int, default=5)
     prep.add_argument('--gpu-workers', type=int, default=10)
     prep.add_argument('--flow-workers', type=int, default=5)
