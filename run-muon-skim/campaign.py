@@ -228,6 +228,11 @@ def prepare(args):
                     ignore=shutil.ignore_patterns('__pycache__'))
     for name in TRACK_FILES:
         shutil.copy2(track_code / name, root / 'code' / name)
+    inventory_source = work / 'dune-nd-mip-calib/sample_inventory.py'
+    if inventory_source.is_file():
+        shutil.copy2(inventory_source, root / 'code/sample_inventory.py')
+    else:
+        print(f'WARNING: automatic inventory disabled; missing {inventory_source}', file=sys.stderr)
     shutil.copy2(__file__, root / 'campaign.py')
     write(root / 'skim-config.json', pilot['metadata']['config'])
     config = dict(name=args.name, root=str(root), outputs=str(outputs), envs=envs,
@@ -240,6 +245,9 @@ def prepare(args):
                   gpu_account=args.gpu_account, external=external,
                   repos={str(p): git_state(p) for p in (larnd, flow)},
                   hashes={str(p): sha(p) for p in sorted((root / 'code').rglob('*.py'))})
+    if inventory_source.is_file():
+        config['inventory_root'] = os.environ.get('FSD_ANALYSIS_ROOT',
+                                                  str(Path(os.environ['SCRATCH']) / 'fsdcube'))
     if ffe_mode:
         overrides = []
         for flag, filename, values in [('detector_properties', f'detector-prc{prc}.yaml', detector),
@@ -441,6 +449,15 @@ def tracks_stage(c):
                                      new_flow_files=len(rows), pilot_tracks=c['pilot_tracks'],
                                      new_tracks=new_tracks, total_tracks=total, output=str(final)))
     print((root / 'summary.json').read_text(), flush=True)
+    if c.get('inventory_root'):
+        try:
+            subprocess.run([sys.executable, str(root / 'code/sample_inventory.py'),
+                            '--root', c['inventory_root'], '--campaign-jobs', str(root.parent),
+                            '--production-root', str(out.parents[1]), '--selection', str(final)],
+                           check=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            print(f'WARNING: campaign completed, but inventory refresh failed: {exc}',
+                  file=sys.stderr)
 
 
 def lock_path(c, name):

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -209,6 +210,9 @@ with open(sys.argv[1], 'a') as stream:
     def prepare_fixture(self):
         work = self.root / 'work'
         jobs = work / 'muon-skim-jobs'
+        inventory = work / 'dune-nd-mip-calib/sample_inventory.py'
+        inventory.parent.mkdir(parents=True)
+        inventory.write_text('# inventory fixture\n')
         scratch = self.root / 'scratch'
         production = work / 'ND_Production-muon-skim/run-muon-skim'
         shutil.copytree(Path(c.__file__).parent / 'muon_skim', production / 'muon_skim')
@@ -333,6 +337,9 @@ with open(sys.argv[1], 'a') as stream:
             cfg = c.read(root / 'campaign.json')
             c.guard(cfg)
         self.assertEqual(len(cfg['sources']), 6)
+        self.assertEqual(cfg['inventory_root'], str(scratch / 'fsdcube'))
+        inventory = root / 'code/sample_inventory.py'
+        self.assertEqual(cfg['hashes'][str(inventory.resolve())], c.sha(inventory))
         self.assertEqual(cfg['sources'][0]['path'], str(source))
         self.assertEqual((cfg['pilot_parts'], cfg['pilot_source_hashes'], cfg['seed_offset']), ([], [], 0))
         self.assertTrue((root / f'detector-prc{prc}.yaml').is_file())
@@ -346,6 +353,36 @@ with open(sys.argv[1], 'a') as stream:
             path = Path(cmd[cmd.index(flag) + 1])
             self.assertEqual(cfg['hashes'][str(path)], c.sha(path))
             self.assertEqual(yaml.safe_load(path.read_text()), expected)
+
+    def test_inventory_hook_runs_after_summary_and_failure_preserves_completion(self):
+        output = self.root / 'production/campaigns/test'
+        final = output / 'tracks/test.tracks.hdf5'
+        final.parent.mkdir(parents=True)
+        with h5py.File(final, 'w') as data:
+            data.attrs['status'] = 'complete'
+            data.create_dataset('tracks/data', shape=(3,))
+            data.create_group('sources/0')
+        cfg = dict(self.config, outputs=str(output), pilot_tracks=0,
+                   inventory_root=str(self.root / 'fsdcube'))
+        c.write(self.root / 'files.json', [dict(flow='flow', larnd='larnd')])
+        modules = {
+            'batch_track_selection': SimpleNamespace(run_batch=lambda *a, **k: ['part']),
+            'merge_track_outputs': SimpleNamespace(merge_outputs=lambda *a, **k: None),
+        }
+
+        def failed_refresh(command, check):
+            self.assertEqual(c.read(self.root / 'summary.json')['status'], 'complete')
+            self.assertEqual(command[command.index('--production-root') + 1],
+                             str(self.root / 'production'))
+            raise subprocess.CalledProcessError(1, command)
+
+        with patch.dict(sys.modules, modules), patch.object(c, 'receipt_valid'), \
+                patch.object(c, 'check_tracks', return_value=3), \
+                patch.object(c.subprocess, 'run', side_effect=failed_refresh) as refresh, \
+                redirect_stdout(io.StringIO()):
+            c.tracks_stage(cfg)
+        refresh.assert_called_once()
+        self.assertEqual(c.read(self.root / 'summary.json')['total_tracks'], 3)
 
 
 if __name__ == '__main__':
